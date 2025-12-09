@@ -1,1 +1,242 @@
 
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <title>Hand Tracker – Doppia Finestra</title>
+  <style>
+    body {
+      margin: 0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #111;
+      color: #eee;
+      font-family: Arial, sans-serif;
+      gap: 10px;
+    }
+
+    #status {
+      font-size: 14px;
+      opacity: 0.8;
+    }
+
+    #container {
+      display: flex;
+      flex-direction: row;
+      gap: 10px;
+    }
+
+    .panel {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      background: #000;
+      border: 2px solid #444;
+      box-shadow: 0 0 10px rgba(0,0,0,0.7);
+      padding: 6px;
+    }
+
+    .panel-title {
+      font-size: 14px;
+      margin-bottom: 4px;
+      opacity: 0.8;
+    }
+
+    video, canvas {
+      display: block;
+      width: 640px;
+      height: 480px;
+      background: #000;
+    }
+  </style>
+</head>
+<body>
+  <div id="status">Consenti l'accesso alla fotocamera per iniziare…</div>
+
+  <div id="container">
+    <div class="panel">
+      <div class="panel-title">Camera</div>
+      <video id="input_video" playsinline></video>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Modello mano semplificato</div>
+      <canvas id="output_canvas" width="640" height="480"></canvas>
+    </div>
+  </div>
+
+  <!-- MediaPipe Hands + Camera utils -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <script>
+    const videoElement  = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx     = canvasElement.getContext('2d');
+    const statusDiv     = document.getElementById('status');
+
+    // Disegna un cerchio
+    function drawCircle(x, y, r) {
+      canvasCtx.beginPath();
+      canvasCtx.arc(x, y, r, 0, 2 * Math.PI);
+      canvasCtx.fill();
+    }
+
+    // Disegna un segmento tra due punti
+    function drawLine(x1, y1, x2, y2) {
+      canvasCtx.beginPath();
+      canvasCtx.moveTo(x1, y1);
+      canvasCtx.lineTo(x2, y2);
+      canvasCtx.stroke();
+    }
+
+    function onResults(results) {
+      canvasCtx.save();
+
+      // Sfondo nero nella finestra del modello
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+      canvasCtx.fillStyle = '#000';
+      canvasCtx.fillRect(0, 0, canvasElement.width, canvasElement.height);
+
+      canvasCtx.lineWidth = 4;
+      canvasCtx.strokeStyle = '#00ffff';
+      canvasCtx.fillStyle = '#ffcc00';
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        statusDiv.textContent = "Mano rilevata ✔";
+
+        const landmarks = results.multiHandLandmarks[0];
+
+        // converte da coordinate normalizzate (0..1) a pixel
+        const toPx = (lm) => ({
+          x: lm.x * canvasElement.width,
+          y: lm.y * canvasElement.height
+        });
+
+        const wrist      = toPx(landmarks[0]);
+        const index_mcp  = toPx(landmarks[5]);
+        const index_pip  = toPx(landmarks[6]);
+        const index_dip  = toPx(landmarks[7]);
+        const index_tip  = toPx(landmarks[8]);
+
+        const middle_mcp = toPx(landmarks[9]);
+        const middle_pip = toPx(landmarks[10]);
+        const middle_dip = toPx(landmarks[11]);
+        const middle_tip = toPx(landmarks[12]);
+
+        const ring_mcp   = toPx(landmarks[13]);
+        const ring_pip   = toPx(landmarks[14]);
+        const ring_dip   = toPx(landmarks[15]);
+        const ring_tip   = toPx(landmarks[16]);
+
+        const pinky_mcp  = toPx(landmarks[17]);
+        const pinky_pip  = toPx(landmarks[18]);
+        const pinky_dip  = toPx(landmarks[19]);
+        const pinky_tip  = toPx(landmarks[20]);
+
+        const thumb_cmc  = toPx(landmarks[1]);
+        const thumb_mcp  = toPx(landmarks[2]);
+        const thumb_ip   = toPx(landmarks[3]);
+        const thumb_tip  = toPx(landmarks[4]);
+
+        // palmo
+        drawLine(wrist.x, wrist.y, index_mcp.x, index_mcp.y);
+        drawLine(wrist.x, wrist.y, middle_mcp.x, middle_mcp.y);
+        drawLine(wrist.x, wrist.y, ring_mcp.x, ring_mcp.y);
+        drawLine(wrist.x, wrist.y, pinky_mcp.x, pinky_mcp.y);
+
+        drawLine(index_mcp.x, index_mcp.y, middle_mcp.x, middle_mcp.y);
+        drawLine(middle_mcp.x, middle_mcp.y, ring_mcp.x, ring_mcp.y);
+        drawLine(ring_mcp.x, ring_mcp.y, pinky_mcp.x, pinky_mcp.y);
+
+        // indice
+        drawLine(index_mcp.x, index_mcp.y, index_pip.x, index_pip.y);
+        drawLine(index_pip.x, index_pip.y, index_dip.x, index_dip.y);
+        drawLine(index_dip.x, index_dip.y, index_tip.x, index_tip.y);
+
+        // medio
+        drawLine(middle_mcp.x, middle_mcp.y, middle_pip.x, middle_pip.y);
+        drawLine(middle_pip.x, middle_pip.y, middle_dip.x, middle_dip.y);
+        drawLine(middle_dip.x, middle_dip.y, middle_tip.x, middle_tip.y);
+
+        // anulare
+        drawLine(ring_mcp.x, ring_mcp.y, ring_pip.x, ring_pip.y);
+        drawLine(ring_pip.x, ring_pip.y, ring_dip.x, ring_dip.y);
+        drawLine(ring_dip.x, ring_dip.y, ring_tip.x, ring_tip.y);
+
+        // mignolo
+        drawLine(pinky_mcp.x, pinky_mcp.y, pinky_pip.x, pinky_pip.y);
+        drawLine(pinky_pip.x, pinky_pip.y, pinky_dip.x, pinky_dip.y);
+        drawLine(pinky_dip.x, pinky_dip.y, pinky_tip.x, pinky_tip.y);
+
+        // pollice
+        drawLine(wrist.x, wrist.y, thumb_cmc.x, thumb_cmc.y);
+        drawLine(thumb_cmc.x, thumb_cmc.y, thumb_mcp.x, thumb_mcp.y);
+        drawLine(thumb_mcp.x, thumb_mcp.y, thumb_ip.x, thumb_ip.y);
+        drawLine(thumb_ip.x, thumb_ip.y, thumb_tip.x, thumb_tip.y);
+
+        const joints = [
+          wrist,
+          index_mcp, index_pip, index_dip, index_tip,
+          middle_mcp, middle_pip, middle_dip, middle_tip,
+          ring_mcp, ring_pip, ring_dip, ring_tip,
+          pinky_mcp, pinky_pip, pinky_dip, pinky_tip,
+          thumb_cmc, thumb_mcp, thumb_ip, thumb_tip
+        ];
+
+        joints.forEach(p => drawCircle(p.x, p.y, 4));
+
+      } else {
+        statusDiv.textContent = "Nessuna mano rilevata… prova a muoverla davanti alla camera.";
+      }
+
+      canvasCtx.restore();
+    }
+
+    const hands = new Hands({
+      locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+      }
+    });
+
+    hands.setOptions({
+      maxNumHands: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.6,
+      modelComplexity: 1
+    });
+
+    hands.onResults(onResults);
+
+    let camera = null;
+
+    function startCamera() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        statusDiv.textContent = "La tua macchina non supporta getUserMedia.";
+        return;
+      }
+
+      camera = new Camera(videoElement, {
+        onFrame: async () => {
+          await hands.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480
+      });
+
+      camera.start().then(() => {
+        statusDiv.textContent = "Camera avviata. Muovi la mano davanti allo schermo.";
+      }).catch(err => {
+        console.error(err);
+        statusDiv.textContent = "Errore nell'accesso alla camera. Controlla i permessi del browser.";
+      });
+    }
+
+    startCamera();
+  </script>
+</body>
+</html>
