@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <title>Virtual Lab – Alberi, Supporti e Cuscinetti (Gesture)</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #050811;
+      color: #eee;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      height: 100%;
+    }
+    #hud {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.6);
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      max-width: 260px;
+      pointer-events: none;
+    }
+    #hud h1 {
+      font-size: 16px;
+      margin: 0 0 6px 0;
+    }
+    #hud p {
+      margin: 4px 0;
+      line-height: 1.3;
+    }
+    #status {
+      font-size: 12px;
+      margin-top: 6px;
+      opacity: 0.9;
+    }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <h1>Virtual Lab – Alberi e Cuscinetti</h1>
+    <p><strong>Controlli di test (mouse/tastiera)</strong></p>
+    <p>
+      – Trascina con il mouse per ruotare la vista<br>
+      – Rotellina per zoom<br>
+      – Tasto <code>E</code> per vista esplosa / normale
+    </p>
+    <p id="modeInfo">Modalità: <strong>Camera</strong></p>
+    <p id="explodeInfo">Vista: <strong>Compatta</strong></p>
+    <div id="status">
+      Webcam: <span id="camStatus">non inizializzata</span><br>
+      Gesture attuale: <span id="gestureStatus">none</span>
+    </div>
+  </div>
+
+  <!-- Three.js core -->
+  <script src="https://unpkg.com/three@0.161.0/build/three.min.js"></script>
+  <!-- Se vuoi usare GLTFLoader per modelli da Sketchfab, tieni anche questa -->
+  <script src="https://unpkg.com/three@0.161.0/examples/js/loaders/GLTFLoader.js"></script>
+
+  <script>
+    // ========================================
+    // 1. SCENA 3D – Setup base
+    // ========================================
+    let scene, camera, renderer;
+    let assemblyGroup;
+    let isExploded = false;
+    let explodeProgress = 0; // 0 compatta, 1 esplosa
+
+    // Camera orbit (controllata da mouse / gesture)
+    let camRadius = 6;
+    let camTheta = Math.PI / 6;  // rotazione intorno all'asse verticale
+    let camPhi   = Math.PI / 4;  // altezza
+
+    // Mouse controls di emergenza / test
+    let isMouseDown = false;
+    let lastMouseX = 0;
+    let lastMouseY = 0;
+
+    function initScene() {
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x050811);
+
+      const aspect = window.innerWidth / window.innerHeight;
+      camera = new THREE.PerspectiveCamera(50, aspect, 0.1, 100);
+      updateCameraPosition();
+
+      renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      document.body.appendChild(renderer.domElement);
+
+      // Luci
+      const hemiLight = new THREE.HemisphereLight(0xffffff, 0x202030, 0.8);
+      scene.add(hemiLight);
+
+      const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+      dirLight.position.set(5, 10, 7);
+      scene.add(dirLight);
+
+      const fillLight = new THREE.PointLight(0x88aaff, 0.5, 50);
+      fillLight.position.set(-6, 4, -4);
+      scene.add(fillLight);
+
+      // Pavimento leggero
+      const groundGeo = new THREE.PlaneGeometry(20, 20, 10, 10);
+      const groundMat = new THREE.MeshStandardMaterial({
+        color: 0x101420,
+        metalness: 0.1,
+        roughness: 0.9
+      });
+      const ground = new THREE.Mesh(groundGeo, groundMat);
+      ground.rotation.x = -Math.PI / 2;
+      ground.position.y = -1.2;
+      scene.add(ground);
+
+      createMechanicalAssembly();
+
+      window.addEventListener('resize', onWindowResize);
+
+      // Controlli mouse (solo per test, verranno sostituiti da gesture)
+      renderer.domElement.addEventListener('mousedown', onMouseDown);
+      renderer.domElement.addEventListener('mousemove', onMouseMove);
+      window.addEventListener('mouseup', onMouseUp);
+      renderer.domElement.addEventListener('wheel', onMouseWheel);
+
+      // Tasto 'E' = explode toggle (debug/test)
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'e' || e.key === 'E') {
+          toggleExplode();
+        }
+      });
+    }
+
+    function updateCameraPosition() {
+      const x = camRadius * Math.cos(camPhi) * Math.sin(camTheta);
+      const y = camRadius * Math.sin(camPhi);
+      const z = camRadius * Math.cos(camPhi) * Math.cos(camTheta);
+      camera.position.set(x, y, z);
+      camera.lookAt(0, 0, 0);
+    }
+
+    function onWindowResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // ========================================
+    // 2. CREAZIONE ASSEMBLY MECCANICO SEMPLIFICATO
+    //    (Albero + cuscinetti + supporti)
+    // ========================================
+    const parts = [];
+
+    function createMechanicalAssembly() {
+      assemblyGroup = new THREE.Group();
+      scene.add(assemblyGroup);
+
+      // Materiali base
+      const steelMat = new THREE.MeshStandardMaterial({
+        color: 0xc0c0c0,
+        metalness: 0.8,
+        roughness: 0.2
+      });
+      const darkSteelMat = new THREE.MeshStandardMaterial({
+        color: 0x555566,
+        metalness: 0.8,
+        roughness: 0.3
+      });
+      const supportMat = new THREE.MeshStandardMaterial({
+        color: 0x264653,
+        metalness: 0.3,
+        roughness: 0.8
+      });
+
+      // Albero (shaft)
+      const shaftGeo = new THREE.CylinderGeometry(0.2, 0.2, 4, 32);
+      const shaft = new THREE.Mesh(shaftGeo, steelMat);
+      shaft.rotation.z = Math.PI / 2;
+      shaft.name = "shaft";
+      assemblyGroup.add(shaft);
+      parts.push({
+        mesh: shaft,
+        compactPos: new THREE.Vector3(0, 0, 0),
+        explodedOffset: new THREE.Vector3(0, 0.2, 0)
+      });
+
+      // Cuscinetti (bearings) – due torus
+      const bearingGeo = new THREE.TorusGeometry(0.45, 0.12, 16, 32);
+      const bearing1 = new THREE.Mesh(bearingGeo, darkSteelMat);
+      bearing1.rotation.y = Math.PI / 2;
+      bearing1.position.x = -1;
+      bearing1.name = "bearing_left";
+      assemblyGroup.add(bearing1);
+      parts.push({
+        mesh: bearing1,
+        compactPos: bearing1.position.clone(),
+        explodedOffset: new THREE.Vector3(-0.6, 0, 0)
+      });
+
+      const bearing2 = new THREE.Mesh(bearingGeo, darkSteelMat);
+      bearing2.rotation.y = Math.PI / 2;
+      bearing2.position.x = 1;
+      bearing2.name = "bearing_right";
+      assemblyGroup.add(bearing2);
+      parts.push({
+        mesh: bearing2,
+        compactPos: bearing2.position.clone(),
+        explodedOffset: new THREE.Vector3(0.6, 0, 0)
+      });
+
+      // Supporti (plummer block)
+      const supportGeo = new THREE.BoxGeometry(1.2, 0.6, 1);
+      const support1 = new THREE.Mesh(supportGeo, supportMat);
+      support1.position.set(-1, -0.5, 0);
+      support1.name = "support_left";
+      assemblyGroup.add(support1);
+      parts.push({
+        mesh: support1,
+        compactPos: support1.position.clone(),
+        explodedOffset: new THREE.Vector3(-0.8, -0.1, 0)
+      });
+
+      const support2 = new THREE.Mesh(supportGeo, supportMat);
+      support2.position.set(1, -0.5, 0);
+      support2.name = "support_right";
+      assemblyGroup.add(support2);
+      parts.push({
+        mesh: support2,
+        compactPos: support2.position.clone(),
+        explodedOffset: new THREE.Vector3(0.8, -0.1, 0)
+      });
+
+      // (OPZIONALE) Caricamento modello realistico da Sketchfab
+      // – Se vuoi usare un .glb:
+      // const loader = new THREE.GLTFLoader();
+      // loader.load('assets/models/mech_assembly.glb', (gltf) => {
+      //   const model = gltf.scene;
+      //   model.position.set(0, 0, 0);
+      //   assemblyGroup.add(model);
+      //   // Puoi poi popolare l'array parts leggendo i figli del modello
+      // }, undefined, (err) => {
+      //   console.error('Errore nel caricamento del modello GLB:', err);
+      // });
+    }
+
+    // Aggiornamento posizioni in base a explodeProgress
+    function updateExplodePositions() {
+      for (const p of parts) {
+        const targetPos = new THREE.Vector3().copy(p.compactPos)
+          .add(p.explodedOffset.clone().multiplyScalar(explodeProgress));
+        p.mesh.position.copy(targetPos);
+      }
+    }
+
+    function toggleExplode() {
+      isExploded = !isExploded;
+      document.getElementById('explodeInfo').innerHTML =
+        'Vista: <strong>' + (isExploded ? 'Esplosa' : 'Compatta') + '</strong>';
+    }
+
+    // ========================================
+    // 3. MOUSE CONTROLS (per test)
+    //    – In produzione, sostituirai con gesture
+    // ========================================
+    function onMouseDown(e) {
+      isMouseDown = true;
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+    }
+
+    function onMouseMove(e) {
+      if (!isMouseDown) return;
+      const dx = e.clientX - lastMouseX;
+      const dy = e.clientY - lastMouseY;
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+
+      rotateCameraByDelta(dx, dy);
+    }
+
+    function onMouseUp() {
+      isMouseDown = false;
+    }
+
+    function onMouseWheel(e) {
+      zoomCamera(e.deltaY * 0.01);
+    }
+
+    function rotateCameraByDelta(dx, dy) {
+      // Piccoli fattori di scala
+      const ROT_SPEED = 0.005;
+      camTheta -= dx * ROT_SPEED;
+      camPhi   -= dy * ROT_SPEED;
+
+      // Limiti per non capovolgere la camera
+      const EPS = 0.1;
+      camPhi = Math.max(EPS, Math.min(Math.PI - EPS, camPhi));
+
+      updateCameraPosition();
+    }
+
+    function zoomCamera(amount) {
+      camRadius += amount;
+      camRadius = Math.max(3, Math.min(15, camRadius));
+      updateCameraPosition();
+    }
+
+    // ========================================
+    // 4. Webcam “nascosta” e hook per HAND TRACKING
+    // ========================================
+    const handState = {
+      gesture: 'none', // 'rotate', 'zoom', 'explodeToggle', etc.
+      normX: 0,
+      normY: 0
+    };
+
+    let hiddenVideo;
+
+    function initWebcam() {
+      hiddenVideo = document.createElement('video');
+      hiddenVideo.autoplay = true;
+      hiddenVideo.playsInline = true;
+      hiddenVideo.muted = true;
+      hiddenVideo.style.display = 'none'; // non visibile
+      document.body.appendChild(hiddenVideo);
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        document.getElementById('camStatus').textContent = 'non supportata';
+        return;
+      }
+
+      navigator.mediaDevices.getUserMedia({ video: true })
+        .then(stream => {
+          hiddenVideo.srcObject = stream;
+          document.getElementById('camStatus').textContent = 'attiva';
+          // QUI AGGANCERAI MEDIAPIPE / TF.JS, usando hiddenVideo come sorgente
+          // es: hands.send({image: hiddenVideo});
+        })
+        .catch(err => {
+          console.error('Errore getUserMedia', err);
+          document.getElementById('camStatus').textContent = 'errore attivazione';
+        });
+    }
+
+    // Questa è la funzione che DOVRAI chiamare dal tuo sistema di hand-tracking
+    // ogni volta che hai una nuova stima di gesture + posizione mano.
+    //
+    // Esempio di uso:
+    // handleHandInput('rotate', 0.1, -0.2);
+    //
+    // dove normX, normY sono normalizzati in [-1, 1].
+    function handleHandInput(gesture, normX, normY) {
+      handState.gesture = gesture;
+      handState.normX = normX;
+      handState.normY = normY;
+      document.getElementById('gestureStatus').textContent =
+        gesture + ' (' + normX.toFixed(2) + ', ' + normY.toFixed(2) + ')';
+    }
+
+    // Logica che mappa le gesture alla scena 3D.
+    // Puoi renderla più sofisticata (smoothing, hysteresis, ecc.).
+    function applyHandControls(deltaTime) {
+      // Esempio semplice:
+      if (handState.gesture === 'rotate') {
+        const dx = handState.normX * 50 * deltaTime; // 50 = fattore arbitrario
+        const dy = handState.normY * 50 * deltaTime;
+        rotateCameraByDelta(dx, dy);
+      } else if (handState.gesture === 'zoom') {
+        const amount = -handState.normY * deltaTime * 5; // muovi mano avanti/indietro
+        zoomCamera(amount);
+      } else if (handState.gesture === 'explodeToggle') {
+        // In pratica vorrai evitare di triggherarlo ad ogni frame;
+        // qui potresti lavorare con flag/hysteresis.
+        // Per demo, chiamiamo toggleExplode e poi resettiamo gesture.
+        toggleExplode();
+        handState.gesture = 'none';
+      }
+    }
+
+    // ========================================
+    // 5. LOOP DI ANIMAZIONE
+    // ========================================
+    let lastTime = performance.now();
+
+    function animate(now) {
+      requestAnimationFrame(animate);
+      const deltaTime = (now - lastTime) / 1000;
+      lastTime = now;
+
+      // Ease verso stato esploso / compatto
+      const target = isExploded ? 1 : 0;
+      const speed = 3; // velocità transizione
+      if (Math.abs(explodeProgress - target) > 0.001) {
+        explodeProgress += (target - explodeProgress) * Math.min(1, speed * deltaTime);
+        explodeProgress = THREE.MathUtils.clamp(explodeProgress, 0, 1);
+        updateExplodePositions();
+      }
+
+      // Applica eventuali gesture mano
+      applyHandControls(deltaTime);
+
+      renderer.render(scene, camera);
+    }
+
+    // ========================================
+    // 6. AVVIO
+    // ========================================
+    initScene();
+    initWebcam();
+    updateExplodePositions();
+    animate(performance.now());
+
+    // Per test rapido senza mano:
+    // – puoi aprire la DevTools e provare:
+    // handleHandInput('rotate', 0.3, 0.0)
+    // handleHandInput('zoom', 0.0, -0.5)
+  </script>
+</body>
+</html>
