@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Webcam → Pose → 3D (Three.js + MediaPipe)</title>
+  <style>
+    body{margin:0; overflow:hidden; background:#0b0f17; color:#fff; font-family:system-ui;}
+    #ui{
+      position:fixed; top:12px; left:12px; z-index:10;
+      background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.16);
+      padding:10px 12px; border-radius:10px; backdrop-filter: blur(8px);
+      width: 320px;
+    }
+    #ui label{display:block; font-size:12px; opacity:.9; margin-top:8px;}
+    #ui input{width:100%;}
+    #video{
+      position:fixed; right:12px; bottom:12px; width:220px;
+      border-radius:12px; border:1px solid rgba(255,255,255,0.16);
+      opacity:.85; z-index:10;
+      transform: scaleX(-1); /* specchio, più naturale */
+    }
+    #status{font-size:12px; opacity:.85; margin-top:6px; line-height:1.35;}
+    .btn{margin-top:10px; width:100%; padding:8px 10px; border-radius:10px; border:0; cursor:pointer;}
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div><b>Webcam → Pose → 3D</b></div>
+    <div id="status">In attesa…</div>
+
+    <label>Smoothing (0 = reattivo, 0.9 = molto fluido)</label>
+    <input id="smooth" type="range" min="0" max="0.95" step="0.01" value="0.65"/>
+
+    <label>Scala avatar</label>
+    <input id="scale" type="range" min="0.5" max="2.5" step="0.01" value="1.35"/>
+
+    <button id="startBtn" class="btn">Avvia webcam</button>
+  </div>
+
+  <video id="video" playsinline></video>
+
+  <script type="module">
+    // Three.js (module CDN)
+    import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
+
+    // MediaPipe Pose (ESM)
+    import { PoseLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8";
+
+    const statusEl = document.getElementById("status");
+    const videoEl  = document.getElementById("video");
+    const smoothEl = document.getElementById("smooth");
+    const scaleEl  = document.getElementById("scale");
+    const startBtn = document.getElementById("startBtn");
+
+    // --- Three scene ---
+    const renderer = new THREE.WebGLRenderer({ antialias:true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x0b0f17, 2, 10);
+
+    const camera = new THREE.PerspectiveCamera(55, window.innerWidth/window.innerHeight, 0.01, 100);
+    camera.position.set(0, 1.2, 3.2);
+
+    const light1 = new THREE.DirectionalLight(0xffffff, 1.2);
+    light1.position.set(2, 4, 2);
+    scene.add(light1);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.35));
+
+    const grid = new THREE.GridHelper(10, 20, 0xffffff, 0xffffff);
+    grid.material.opacity = 0.08;
+    grid.material.transparent = true;
+    scene.add(grid);
+
+    // --- "Personaggio stilizzato": sfere + cilindri (bones) ---
+    const avatar = new THREE.Group();
+    scene.add(avatar);
+
+    const matJoint = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4, metalness: 0.0 });
+    const matBone  = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.7, metalness: 0.0 });
+
+    function makeSphere(r=0.035){
+      return new THREE.Mesh(new THREE.SphereGeometry(r, 16, 16), matJoint);
+    }
+
+    function makeBone(){
+      // Un cilindro unitario che poi scaleremo in Y per la lunghezza
+      const geo = new THREE.CylinderGeometry(0.018, 0.018, 1, 12);
+      const mesh = new THREE.Mesh(geo, matBone);
+      return mesh;
+    }
+
+    // Joints
+    const J = {
+      nose: makeSphere(0.028),
+      lShoulder: makeSphere(), rShoulder: makeSphere(),
+      lElbow: makeSphere(),    rElbow: makeSphere(),
+      lWrist: makeSphere(),    rWrist: makeSphere(),
+      lHip: makeSphere(),      rHip: makeSphere(),
+      lKnee: makeSphere(),     rKnee: makeSphere(),
+      lAnkle: makeSphere(),    rAnkle: makeSphere(),
+      midShoulder: makeSphere(0.03),
+      midHip: makeSphere(0.03),
+    };
+
+    // Bones (connections)
+    const B = {
+      neck: makeBone(),
+      spine: makeBone(),
+      lUpperArm: makeBone(), lLowerArm: makeBone(),
+      rUpperArm: makeBone(), rLowerArm: makeBone(),
+      lUpperLeg: makeBone(), lLowerLeg: makeBone(),
+      rUpperLeg: makeBone(), rLowerLeg: makeBone(),
+      shoulders: makeBone(),
+      hips: makeBone(),
+    };
+
+    Object.values(J).forEach(m => avatar.add(m));
+    Object.values(B).forEach(m => avatar.add(m));
+
+    // Helpers: place bone between two points
+    const _v1 = new THREE.Vector3();
+    const _v2 = new THREE.Vector3();
+    const _mid = new THREE.Vector3();
+    const _dir = new THREE.Vector3();
+    const _quat = new THREE.Quaternion();
+    const YAXIS = new THREE.Vector3(0,1,0);
+
+    function placeBone(boneMesh, a, b, radius=0.018){
+      _v1.copy(a); _v2.copy(b);
+      _mid.copy(_v1).add(_v2).multiplyScalar(0.5);
+      boneMesh.position.copy(_mid);
+
+      _dir.copy(_v2).sub(_v1);
+      const len = _dir.length();
+      if(len < 1e-4){
+        boneMesh.visible = false;
+        return;
+      }
+      boneMesh.visible = true;
+
+      _dir.normalize();
+      _quat.setFromUnitVectors(YAXIS, _dir);
+      boneMesh.quaternion.copy(_quat);
+      boneMesh.scale.set(radius/0.018, len, radius/0.018); // len in Y
+    }
+
+    // --- MediaPipe Pose setup ---
+    let landmarker = null;
+    let running = false;
+    let lastT = 0;
+
+    // Smoothing state
+    const smoothed = new Map(); // key -> THREE.Vector3
+
+    function smoothVec(key, v, alpha){
+      // alpha = 0 => no smoothing (instant), alpha = 0.9 => heavy smoothing
+      const prev = smoothed.get(key);
+      if(!prev){
+        smoothed.set(key, v.clone());
+        return v;
+      }
+      prev.lerp(v, 1 - alpha);
+      return prev;
+    }
+
+    // Landmark indices (MediaPipe Pose)
+    // https://developers.google.com/mediapipe/solutions/vision/pose_landmarker
+    const IDX = {
+      nose: 0,
+      lShoulder: 11, rShoulder: 12,
+      lElbow: 13,    rElbow: 14,
+      lWrist: 15,    rWrist: 16,
+      lHip: 23,      rHip: 24,
+      lKnee: 25,     rKnee: 26,
+      lAnkle: 27,    rAnkle: 28,
+    };
+
+    function lmToWorld(lm){
+      // lm: normalized [0..1] with origin top-left on image.
+      // Convert to a simple 3D space: x [-1..1], y [0..2] (up), z [-1..1] depth-ish
+      // Also mirror X so it matches the mirrored video.
+      const x = (0.5 - lm.x) * 2.0;   // mirror + center
+      const y = (1.0 - lm.y) * 2.0;   // up
+      const z = (lm.z ?? 0) * 2.0;    // depth (negative is forward usually)
+      return new THREE.Vector3(x, y, -z);
+    }
+
+    function updateAvatar(landmarks){
+      if(!landmarks) return;
+
+      const alpha = parseFloat(smoothEl.value);
+      const s = parseFloat(scaleEl.value);
+
+      // Extract relevant points
+      const P = {};
+      for(const k in IDX){
+        const lm = landmarks[IDX[k]];
+        if(!lm) continue;
+        // visibility can be used as confidence
+        const v = lmToWorld(lm).multiplyScalar(s);
+        P[k] = smoothVec(k, v, alpha);
+      }
+
+      // Derived points
+      if(P.lShoulder && P.rShoulder){
+        P.midShoulder = smoothVec("midShoulder",
+          P.lShoulder.clone().add(P.rShoulder).multiplyScalar(0.5), alpha);
+      }
+      if(P.lHip && P.rHip){
+        P.midHip = smoothVec("midHip",
+          P.lHip.clone().add(P.rHip).multiplyScalar(0.5), alpha);
+      }
+
+      // Place joints
+      const mapJoint = {
+        nose:"nose",
+        lShoulder:"lShoulder", rShoulder:"rShoulder",
+        lElbow:"lElbow", rElbow:"rElbow",
+        lWrist:"lWrist", rWrist:"rWrist",
+        lHip:"lHip", rHip:"rHip",
+        lKnee:"lKnee", rKnee:"rKnee",
+        lAnkle:"lAnkle", rAnkle:"rAnkle",
+        midShoulder:"midShoulder",
+        midHip:"midHip",
+      };
+      for(const j in mapJoint){
+        const key = mapJoint[j];
+        if(P[key]){
+          J[j].visible = true;
+          J[j].position.copy(P[key]);
+        } else {
+          J[j].visible = false;
+        }
+      }
+
+      // Bones
+      if(P.midShoulder && P.midHip){
+        placeBone(B.spine, P.midHip, P.midShoulder, 0.020);
+      }
+      if(P.nose && P.midShoulder){
+        placeBone(B.neck, P.midShoulder, P.nose, 0.016);
+      }
+      if(P.lShoulder && P.rShoulder){
+        placeBone(B.shoulders, P.lShoulder, P.rShoulder, 0.018);
+      }
+      if(P.lHip && P.rHip){
+        placeBone(B.hips, P.lHip, P.rHip, 0.018);
+      }
+
+      // Arms
+      if(P.lShoulder && P.lElbow) placeBone(B.lUpperArm, P.lShoulder, P.lElbow, 0.017);
+      if(P.lElbow && P.lWrist)    placeBone(B.lLowerArm, P.lElbow, P.lWrist, 0.016);
+      if(P.rShoulder && P.rElbow) placeBone(B.rUpperArm, P.rShoulder, P.rElbow, 0.017);
+      if(P.rElbow && P.rWrist)    placeBone(B.rLowerArm, P.rElbow, P.rWrist, 0.016);
+
+      // Legs
+      if(P.lHip && P.lKnee)   placeBone(B.lUpperLeg, P.lHip, P.lKnee, 0.018);
+      if(P.lKnee && P.lAnkle) placeBone(B.lLowerLeg, P.lKnee, P.lAnkle, 0.017);
+      if(P.rHip && P.rKnee)   placeBone(B.rUpperLeg, P.rHip, P.rKnee, 0.018);
+      if(P.rKnee && P.rAnkle) placeBone(B.rLowerLeg, P.rKnee, P.rAnkle, 0.017);
+
+      // Keep avatar centered a bit lower (so feet are near grid)
+      avatar.position.set(0, -0.2, 0);
+    }
+
+    async function initPose(){
+      statusEl.textContent = "Carico modello pose…";
+      const vision = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm"
+      );
+
+      landmarker = await PoseLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numPoses: 1
+      });
+
+      statusEl.textContent = "Modello pronto.";
+    }
+
+    async function startWebcam(){
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480, facingMode: "user" },
+        audio: false
+      });
+      videoEl.srcObject = stream;
+      await videoEl.play();
+    }
+
+    function loop(t){
+      requestAnimationFrame(loop);
+
+      // Render 3D
+      renderer.render(scene, camera);
+
+      if(!running || !landmarker || videoEl.readyState < 2) return;
+
+      // Throttle: run pose at most ~30fps
+      if(t - lastT < 33) return;
+      lastT = t;
+
+      const result = landmarker.detectForVideo(videoEl, performance.now());
+      const pose = result?.landmarks?.[0];
+      updateAvatar(pose);
+    }
+
+    startBtn.addEventListener("click", async () => {
+      try{
+        startBtn.disabled = true;
+        statusEl.textContent = "Avvio webcam…";
+        await startWebcam();
+        if(!landmarker) await initPose();
+        running = true;
+        statusEl.textContent = "Tracking attivo. Muoviti davanti alla camera 🙂";
+      }catch(err){
+        console.error(err);
+        statusEl.textContent = "Errore: " + (err?.message || err);
+        startBtn.disabled = false;
+      }
+    });
+
+    window.addEventListener("resize", () => {
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+    });
+
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
